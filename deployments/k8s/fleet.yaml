@@ -51,7 +51,7 @@ spec:
           image: gcr.io/qsync-production/qsync-gateway:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            - containerPort: 8000
           envFrom:
             - configMapRef:
                 name: qsync-config
@@ -65,13 +65,13 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8080
+              port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /healthz
-              port: 8080
+              port: 8000
             initialDelaySeconds: 2
             periodSeconds: 5
 
@@ -88,7 +88,7 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: 8080
+      targetPort: 8000
 
 ---
 # ------------------------------------------------------------------------------

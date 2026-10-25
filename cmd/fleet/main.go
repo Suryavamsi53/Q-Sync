@@ -31,7 +31,7 @@ func main() {
 		{Name: "Booking Engine (gRPC)", CmdPath: "./cmd/booking", HealthURL: ""},
 		{Name: "Payment Saga Worker", CmdPath: "./cmd/payment", HealthURL: ""},
 		{Name: "Notification Service", CmdPath: "./cmd/notification", HealthURL: ""},
-		{Name: "API Gateway Router", CmdPath: "./cmd/gateway", HealthURL: "http://localhost:8080/healthz"},
+		{Name: "API Gateway Router", CmdPath: "./cmd/gateway", HealthURL: "http://localhost:8000/healthz"},
 	}
 
 	var procs []*exec.Cmd
@@ -72,7 +72,7 @@ func main() {
 	client := http.Client{Timeout: 1 * time.Second}
 	ready := false
 	for i := 0; i < 10; i++ {
-		resp, err := client.Get("http://localhost:8080/healthz")
+		resp, err := client.Get("http://localhost:8000/healthz")
 		if err == nil && resp.StatusCode == http.StatusOK {
 			ready = true
 			resp.Body.Close()
@@ -95,7 +95,7 @@ func main() {
 
 	fmt.Println("\n================================================================================")
 	fmt.Println(" Fleet is active and listening for traffic:")
-	fmt.Println(" • API Gateway (REST)   : http://localhost:8080")
+	fmt.Println(" • API Gateway (REST)   : http://localhost:8000")
 	fmt.Println(" • Catalog Discovery    : http://localhost:8082")
 	fmt.Println(" • Booking Core (gRPC)  : localhost:50051")
 	fmt.Println(" Press Ctrl+C to shut down all microservices gracefully.")

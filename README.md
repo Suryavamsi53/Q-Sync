@@ -71,3 +71,20 @@ go run ./cmd/booking
 # In terminal 2:
 go run ./cmd/stress -c 1000 -seat seat-042
 ```
+
+---
+
+## Web Control Center Dashboard
+
+The API Gateway runs on port `8000` (free of port 8080 conflicts with Jenkins):
+
+```bash
+# Start complete fleet (all 5 microservices):
+go run ./cmd/fleet
+```
+
+Open in browser: **http://localhost:8000**
+- Interactive 500-seat stadium map with live seat hold/release
+- Live 409 Conflict detection
+- In-browser 1,000-user flash sale stress test simulator
+

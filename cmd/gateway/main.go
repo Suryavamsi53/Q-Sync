@@ -166,7 +166,7 @@ func main() {
 
 	port := os.Getenv("GATEWAY_PORT")
 	if port == "" {
-		port = "8080"
+		port = "8000"
 	}
 
 	server := &http.Server{

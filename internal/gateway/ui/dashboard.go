@@ -422,7 +422,7 @@ const DashboardHTML = `<!DOCTYPE html>
         <div style="margin-top:14px;">
           <div style="font-size:12px; font-weight:600; margin-bottom:6px;">Live Fleet Telemetry:</div>
           <div class="log-box" id="log-box">
-            <div class="log-entry">[READY] System online. Ingress Router listening on :8080</div>
+            <div class="log-entry">[READY] System online. Ingress Router listening on :8000</div>
           </div>
         </div>
       </div>
@@ -434,7 +434,7 @@ const DashboardHTML = `<!DOCTYPE html>
         </div>
         <div class="fleet-item">
           <span class="name">API Gateway (REST)</span>
-          <span class="tag">Port 8080</span>
+          <span class="tag">Port 8000</span>
         </div>
         <div class="fleet-item">
           <span class="name">Catalog Discovery (Singleflight)</span>
