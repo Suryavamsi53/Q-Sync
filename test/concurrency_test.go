@@ -114,6 +114,18 @@ func (m *MockBookingRepo) MarkOutboxEventPublished(ctx context.Context, eventID 
 	return nil
 }
 
+func (m *MockBookingRepo) IncrementOutboxRetry(ctx context.Context, eventID string, errText string) error {
+	return nil
+}
+
+func (m *MockBookingRepo) MarkOutboxEventDLQ(ctx context.Context, eventID string, reason string) error {
+	return nil
+}
+
+func (m *MockBookingRepo) ExpireAbandonedReservations(ctx context.Context, batchSize int) ([]*domain.Reservation, error) {
+	return nil, nil
+}
+
 // TestHighConcurrencySeatReservation simulates 1,000 goroutines simultaneously trying to reserve the exact same seat
 func TestHighConcurrencySeatReservation(t *testing.T) {
 	lockRepo := NewMockSeatLock()

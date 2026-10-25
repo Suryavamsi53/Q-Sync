@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/qsync/platform/internal/booking/domain"
 	"github.com/qsync/platform/internal/booking/port"
+	"github.com/qsync/platform/pkg/metrics"
 )
 
 type BookingService struct {
@@ -29,14 +30,22 @@ func (s *BookingService) ReserveSeat(
 	eventID, seatID, userID, idempotencyKey string,
 	holdDuration time.Duration,
 ) (*domain.Reservation, error) {
+	totalStart := time.Now()
+	defer func() {
+		metrics.ReservationDuration.WithLabelValues("total").Observe(time.Since(totalStart).Seconds())
+	}()
+
 	if holdDuration <= 0 {
 		holdDuration = 10 * time.Minute
 	}
 
 	// 1. Acquire distributed seat hold lock via Redis atomic Lua script (fast rejection in < 2ms)
+	lockStart := time.Now()
 	if err := s.lockRepo.AcquireHold(ctx, eventID, seatID, userID, holdDuration); err != nil {
+		metrics.ReservationsTotal.WithLabelValues("conflict").Inc()
 		return nil, err // Returns ErrSeatAlreadyLocked if already claimed
 	}
+	metrics.ReservationDuration.WithLabelValues("redis_lock").Observe(time.Since(lockStart).Seconds())
 
 	// 2. Prepare domain model
 	now := time.Now().UTC()
@@ -70,11 +79,17 @@ func (s *BookingService) ReserveSeat(
 	}
 
 	// 4. Atomically persist to PostgreSQL (ACID)
+	dbStart := time.Now()
 	if err := s.bookingRepo.CreatePendingReservation(ctx, reservation, outboxEvent); err != nil {
 		// Compensation: If database write fails, release the Redis lock immediately to prevent orphan locks
 		_ = s.lockRepo.ReleaseHold(ctx, eventID, seatID, userID)
+		metrics.ReservationsTotal.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("failed to persist reservation: %w", err)
 	}
+	metrics.ReservationDuration.WithLabelValues("db_write").Observe(time.Since(dbStart).Seconds())
+
+	metrics.ReservationsTotal.WithLabelValues("success").Inc()
+	metrics.ActiveHoldsGauge.Inc()
 
 	return reservation, nil
 }
@@ -83,10 +98,12 @@ func (s *BookingService) ReserveSeat(
 func (s *BookingService) ConfirmBooking(ctx context.Context, reservationID, paymentID string) (*domain.Reservation, error) {
 	res, err := s.bookingRepo.GetReservation(ctx, reservationID)
 	if err != nil {
+		metrics.ConfirmationsTotal.WithLabelValues("error").Inc()
 		return nil, err
 	}
 
 	if !res.CanConfirm() {
+		metrics.ConfirmationsTotal.WithLabelValues("not_found").Inc()
 		return nil, domain.ErrInvalidStatusTransition
 	}
 
@@ -107,11 +124,16 @@ func (s *BookingService) ConfirmBooking(ctx context.Context, reservationID, paym
 	}
 
 	if err := s.bookingRepo.ConfirmReservation(ctx, res.ID, now, outbox); err != nil {
+		metrics.ConfirmationsTotal.WithLabelValues("error").Inc()
 		return nil, err
 	}
 
 	res.Status = domain.StatusConfirmed
 	res.ConfirmedAt = &now
+
+	metrics.ConfirmationsTotal.WithLabelValues("success").Inc()
+	metrics.ActiveHoldsGauge.Dec()
+
 	return res, nil
 }
 
@@ -119,6 +141,7 @@ func (s *BookingService) ConfirmBooking(ctx context.Context, reservationID, paym
 func (s *BookingService) CancelReservation(ctx context.Context, reservationID, userID, reason string) error {
 	res, err := s.bookingRepo.GetReservation(ctx, reservationID)
 	if err != nil {
+		metrics.CancellationsTotal.WithLabelValues("error").Inc()
 		return err
 	}
 
@@ -140,7 +163,15 @@ func (s *BookingService) CancelReservation(ctx context.Context, reservationID, u
 		CreatedAt:     time.Now().UTC(),
 	}
 
-	return s.bookingRepo.CancelReservation(ctx, res.ID, outbox)
+	if err := s.bookingRepo.CancelReservation(ctx, res.ID, outbox); err != nil {
+		metrics.CancellationsTotal.WithLabelValues("error").Inc()
+		return err
+	}
+
+	metrics.CancellationsTotal.WithLabelValues(reason).Inc()
+	metrics.ActiveHoldsGauge.Dec()
+
+	return nil
 }
 
 // GetBooking retrieves the current booking state

@@ -128,3 +128,43 @@ func (r *InMemoryBookingRepository) MarkOutboxEventPublished(ctx context.Context
 	}
 	return nil
 }
+
+func (r *InMemoryBookingRepository) IncrementOutboxRetry(ctx context.Context, eventID string, errText string) error {
+	// In-memory no-op tracking
+	return nil
+}
+
+func (r *InMemoryBookingRepository) MarkOutboxEventDLQ(ctx context.Context, eventID string, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for i, ev := range r.outbox {
+		if ev.ID == eventID {
+			r.outbox = append(r.outbox[:i], r.outbox[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+func (r *InMemoryBookingRepository) ExpireAbandonedReservations(ctx context.Context, batchSize int) ([]*domain.Reservation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var expired []*domain.Reservation
+	now := time.Now().UTC()
+
+	for _, res := range r.reservations {
+		if res.Status == domain.StatusPending && now.After(res.ExpiresAt) {
+			res.Status = domain.StatusExpired
+			copyRes := *res
+			expired = append(expired, &copyRes)
+			if len(expired) >= batchSize {
+				break
+			}
+		}
+	}
+
+	return expired, nil
+}
+

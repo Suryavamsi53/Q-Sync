@@ -16,6 +16,7 @@ import (
 	bookingv1 "github.com/qsync/platform/gen/go/booking/v1"
 	"github.com/qsync/platform/internal/gateway/ui"
 	"github.com/qsync/platform/pkg/logger"
+	"github.com/qsync/platform/pkg/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -153,6 +154,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"UP","service":"api-gateway"}`))
 	})
+
+	// Prometheus Metrics
+	mux.Handle("GET /metrics", metrics.Handler())
 
 	// Proxy Catalog Discovery
 	mux.HandleFunc("GET /api/v1/events", gw.handleProxyCatalog)

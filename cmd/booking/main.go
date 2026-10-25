@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 	"github.com/qsync/platform/internal/booking/port"
 	"github.com/qsync/platform/internal/booking/service"
 	"github.com/qsync/platform/pkg/logger"
+	"github.com/qsync/platform/pkg/metrics"
 	goredis "github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 )
@@ -104,7 +106,24 @@ func main() {
 	go sagaConsumer.Start(ctx)
 	defer sagaConsumer.Close()
 
-	// 6. Start gRPC Server
+	// 6. Start Inventory Consistency Sweeper (reconciles abandoned cart holds)
+	sweeper := service.NewInventorySweeper(lockRepo, bookingRepo, 15*time.Second, 100, log)
+	go sweeper.Start(ctx)
+
+	// 7. Start Prometheus Metrics HTTP Server
+	metricsPort := os.Getenv("BOOKING_METRICS_PORT")
+	if metricsPort == "" {
+		metricsPort = "9090"
+	}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", metrics.Handler())
+	metricsServer := &http.Server{Addr: ":" + metricsPort, Handler: metricsMux}
+	go func() {
+		log.Info("Booking Prometheus metrics exporter online", "port", metricsPort, "path", "/metrics")
+		_ = metricsServer.ListenAndServe()
+	}()
+
+	// 8. Start gRPC Server
 	grpcPort := os.Getenv("GRPC_PORT")
 	if grpcPort == "" {
 		grpcPort = "50051"

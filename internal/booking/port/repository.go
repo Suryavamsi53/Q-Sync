@@ -42,4 +42,14 @@ type BookingRepository interface {
 	
 	// MarkOutboxEventPublished marks an event as published
 	MarkOutboxEventPublished(ctx context.Context, eventID string) error
+
+	// IncrementOutboxRetry records a failed delivery attempt with exponential backoff metadata
+	IncrementOutboxRetry(ctx context.Context, eventID string, errText string) error
+
+	// MarkOutboxEventDLQ permanently routes a repeatedly failed event to Dead Letter Queue status
+	MarkOutboxEventDLQ(ctx context.Context, eventID string, reason string) error
+
+	// ExpireAbandonedReservations identifies PENDING reservations past expires_at,
+	// marks them EXPIRED, and resets seats.status = 'AVAILABLE' in a single transaction.
+	ExpireAbandonedReservations(ctx context.Context, batchSize int) ([]*domain.Reservation, error)
 }

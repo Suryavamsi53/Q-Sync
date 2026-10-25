@@ -19,7 +19,8 @@ func NewPostgresBookingRepository(db *sql.DB) *PostgresBookingRepository {
 	return &PostgresBookingRepository{db: db}
 }
 
-// CreatePendingReservation stores the reservation and outbox event inside a single ACID transaction
+// CreatePendingReservation stores the reservation, updates seat status to HELD,
+// and records the outbox event inside a single atomic ACID transaction.
 func (r *PostgresBookingRepository) CreatePendingReservation(ctx context.Context, res *domain.Reservation, outbox *port.OutboxEvent) error {
 	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
@@ -53,7 +54,25 @@ func (r *PostgresBookingRepository) CreatePendingReservation(ctx context.Context
 		return nil
 	}
 
-	// 2. Insert transactional outbox event
+	// 2. Enforce seats table consistency if seat exists in database
+	const updateSeatSQL = `
+		UPDATE seats 
+		SET status = 'HELD', version = version + 1
+		WHERE event_id = $1 AND id = $2 AND status = 'AVAILABLE';
+	`
+	seatResult, err := tx.ExecContext(ctx, updateSeatSQL, res.EventID, res.SeatID)
+	if err == nil {
+		rows, _ := seatResult.RowsAffected()
+		if rows == 0 {
+			var seatExists bool
+			_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM seats WHERE event_id = $1 AND id = $2)`, res.EventID, res.SeatID).Scan(&seatExists)
+			if seatExists {
+				return domain.ErrSeatAlreadyLocked
+			}
+		}
+	}
+
+	// 3. Insert transactional outbox event
 	if outbox != nil {
 		const insertOutboxSQL = `
 			INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload, status, created_at)
@@ -74,7 +93,7 @@ func (r *PostgresBookingRepository) CreatePendingReservation(ctx context.Context
 	return tx.Commit()
 }
 
-// ConfirmReservation marks reservation as confirmed and queues a BookingConfirmed outbox event
+// ConfirmReservation marks reservation as CONFIRMED, marks seat as SOLD, and enqueues BookingConfirmed event
 func (r *PostgresBookingRepository) ConfirmReservation(ctx context.Context, reservationID string, confirmedAt time.Time, outbox *port.OutboxEvent) error {
 	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
@@ -82,12 +101,12 @@ func (r *PostgresBookingRepository) ConfirmReservation(ctx context.Context, rese
 	}
 	defer tx.Rollback()
 
-	const updateSQL = `
+	const updateResSQL = `
 		UPDATE reservations 
 		SET status = 'CONFIRMED', confirmed_at = $1 
 		WHERE id = $2 AND status = 'PENDING';
 	`
-	result, err := tx.ExecContext(ctx, updateSQL, confirmedAt, reservationID)
+	result, err := tx.ExecContext(ctx, updateResSQL, confirmedAt, reservationID)
 	if err != nil {
 		return err
 	}
@@ -95,6 +114,14 @@ func (r *PostgresBookingRepository) ConfirmReservation(ctx context.Context, rese
 	if rows == 0 {
 		return domain.ErrInvalidStatusTransition
 	}
+
+	// Update seats table to SOLD
+	const updateSeatSQL = `
+		UPDATE seats 
+		SET status = 'SOLD', version = version + 1
+		WHERE (event_id, id) = (SELECT event_id, seat_id FROM reservations WHERE id = $1);
+	`
+	_, _ = tx.ExecContext(ctx, updateSeatSQL, reservationID)
 
 	if outbox != nil {
 		const insertOutboxSQL = `
@@ -116,7 +143,7 @@ func (r *PostgresBookingRepository) ConfirmReservation(ctx context.Context, rese
 	return tx.Commit()
 }
 
-// CancelReservation marks reservation as cancelled
+// CancelReservation marks reservation as CANCELLED and resets seat status to AVAILABLE
 func (r *PostgresBookingRepository) CancelReservation(ctx context.Context, reservationID string, outbox *port.OutboxEvent) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -128,6 +155,14 @@ func (r *PostgresBookingRepository) CancelReservation(ctx context.Context, reser
 	if _, err := tx.ExecContext(ctx, updateSQL, reservationID); err != nil {
 		return err
 	}
+
+	// Reset seat to AVAILABLE
+	const updateSeatSQL = `
+		UPDATE seats 
+		SET status = 'AVAILABLE', version = version + 1
+		WHERE (event_id, id) = (SELECT event_id, seat_id FROM reservations WHERE id = $1);
+	`
+	_, _ = tx.ExecContext(ctx, updateSeatSQL, reservationID)
 
 	if outbox != nil {
 		const insertOutboxSQL = `
@@ -147,6 +182,69 @@ func (r *PostgresBookingRepository) CancelReservation(ctx context.Context, reser
 	}
 
 	return tx.Commit()
+}
+
+// ExpireAbandonedReservations selects expired PENDING reservations and releases their seats back to inventory
+func (r *PostgresBookingRepository) ExpireAbandonedReservations(ctx context.Context, batchSize int) ([]*domain.Reservation, error) {
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	const selectExpiredSQL = `
+		SELECT id, event_id, seat_id, user_id, idempotency_key, status, created_at, expires_at
+		FROM reservations
+		WHERE status = 'PENDING' AND expires_at < NOW()
+		ORDER BY expires_at ASC
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED;
+	`
+	rows, err := tx.QueryContext(ctx, selectExpiredSQL, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var expired []*domain.Reservation
+	for rows.Next() {
+		var res domain.Reservation
+		var statusStr string
+		if err := rows.Scan(
+			&res.ID,
+			&res.EventID,
+			&res.SeatID,
+			&res.UserID,
+			&res.IdempotencyKey,
+			&statusStr,
+			&res.CreatedAt,
+			&res.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		res.Status = domain.ReservationStatus(statusStr)
+		expired = append(expired, &res)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Update reservations to EXPIRED and seats to AVAILABLE
+	for _, res := range expired {
+		_, _ = tx.ExecContext(ctx, `UPDATE reservations SET status = 'EXPIRED' WHERE id = $1`, res.ID)
+		_, _ = tx.ExecContext(ctx, `UPDATE seats SET status = 'AVAILABLE', version = version + 1 WHERE event_id = $1 AND id = $2`, res.EventID, res.SeatID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return expired, nil
 }
 
 // GetReservation fetches a reservation record by ID
@@ -218,6 +316,20 @@ func (r *PostgresBookingRepository) FetchPendingOutboxEvents(ctx context.Context
 // MarkOutboxEventPublished marks event as published
 func (r *PostgresBookingRepository) MarkOutboxEventPublished(ctx context.Context, eventID string) error {
 	const query = `UPDATE outbox_events SET status = 'PUBLISHED', published_at = NOW() WHERE id = $1;`
+	_, err := r.db.ExecContext(ctx, query, eventID)
+	return err
+}
+
+// IncrementOutboxRetry increments retry count and sets error
+func (r *PostgresBookingRepository) IncrementOutboxRetry(ctx context.Context, eventID string, errText string) error {
+	const query = `UPDATE outbox_events SET retry_count = retry_count + 1 WHERE id = $1;`
+	_, err := r.db.ExecContext(ctx, query, eventID)
+	return err
+}
+
+// MarkOutboxEventDLQ permanently routes a failed event to Dead Letter Queue status
+func (r *PostgresBookingRepository) MarkOutboxEventDLQ(ctx context.Context, eventID string, reason string) error {
+	const query = `UPDATE outbox_events SET status = 'DEAD_LETTER', published_at = NOW() WHERE id = $1;`
 	_, err := r.db.ExecContext(ctx, query, eventID)
 	return err
 }
