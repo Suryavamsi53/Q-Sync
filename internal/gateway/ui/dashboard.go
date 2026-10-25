@@ -5,7 +5,7 @@ const DashboardHTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>District by Q-Sync | Movies, Concerts, Standup & Flash Sale Ticketing</title>
+  <title>Q-Sync | Movies, Concerts, Standup & Flash Sale Ticketing</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Outfit:wght@400;600;700;800;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
@@ -1602,10 +1602,10 @@ const DashboardHTML = `<!DOCTYPE html>
         
         <!-- Logo -->
         <div class="brand-section" onclick="window.scrollTo({top: 0, behavior: 'smooth'})">
-          <div class="brand-badge">D</div>
+          <div class="brand-badge">Q</div>
           <div class="brand-name">
-            <h1>DISTRICT</h1>
-            <span>by Q-Sync Core</span>
+            <h1>Q-SYNC</h1>
+            <span>Live Entertainment</span>
           </div>
         </div>
 
