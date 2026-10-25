@@ -1,0 +1,137 @@
+# ==============================================================================
+# Q-Sync Distributed Event Ticketing Platform - GitLab CI Pipeline Template
+# Stages: Lint -> Test -> Build & Push (GCR/GAR) -> GKE Deploy Preparation
+# ==============================================================================
+
+stages:
+  - lint
+  - test
+  - build
+  - deploy-prep
+
+variables:
+  GO_VERSION: "1.23"
+  GCP_PROJECT_ID: "qsync-production"
+  GCR_REGISTRY: "gcr.io/${GCP_PROJECT_ID}"
+  # Microservices included in the monorepo
+  SERVICES: "booking payment catalog notification"
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+
+# Reusable cache for Go module dependencies
+.go-cache: &go-cache
+  key:
+    files:
+      - go.mod
+      - go.sum
+  paths:
+    - .go/pkg/mod/
+
+# ------------------------------------------------------------------------------
+# 1. LINT STAGE
+# ------------------------------------------------------------------------------
+lint:
+  stage: lint
+  image: golangci/golangci-lint:v1.60-alpine
+  cache:
+    <<: *go-cache
+  before_script:
+    - export GOPATH="$CI_PROJECT_DIR/.go"
+  script:
+    - golangci-lint run --timeout 5m ./...
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ------------------------------------------------------------------------------
+# 2. TEST STAGE
+# ------------------------------------------------------------------------------
+test:
+  stage: test
+  image: golang:1.23-alpine
+  cache:
+    <<: *go-cache
+  before_script:
+    - apk add --no-cache gcc musl-dev git
+    - export GOPATH="$CI_PROJECT_DIR/.go"
+    - go mod download
+  script:
+    - go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+    - go tool cover -func=coverage.out
+  coverage: '/total:\s+\(statements\)\s+(\d+.\d+)%/'
+  artifacts:
+    name: "coverage-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 7 days
+    paths:
+      - coverage.out
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.out
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ------------------------------------------------------------------------------
+# 3. BUILD & PUSH TO GOOGLE CONTAINER REGISTRY (GCR)
+# Uses Google Kaniko for daemonless, unprivileged, high-speed container builds
+# ------------------------------------------------------------------------------
+.build_kaniko_template: &build_kaniko
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.0-debug
+    entrypoint: [""]
+  before_script:
+    # Authenticate Kaniko with Google Cloud Service Account
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"https://gcr.io\":{\"auth\":\"$(echo -n _json_key:${GCP_SA_KEY} | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+
+build:booking:
+  <<: *build_kaniko
+  script:
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/deployments/docker/Dockerfile.booking"
+      --destination "${GCR_REGISTRY}/qsync-booking:${CI_COMMIT_SHORT_SHA}"
+      --destination "${GCR_REGISTRY}/qsync-booking:latest"
+      --cache=true
+      --cache-dir="${CI_PROJECT_DIR}/.kaniko-cache"
+
+build:payment:
+  <<: *build_kaniko
+  script:
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/deployments/docker/Dockerfile.payment"
+      --destination "${GCR_REGISTRY}/qsync-payment:${CI_COMMIT_SHORT_SHA}"
+      --destination "${GCR_REGISTRY}/qsync-payment:latest"
+      --cache=true
+
+# ------------------------------------------------------------------------------
+# 4. GKE DEPLOYMENT PREPARATION
+# Synthesizes Kubernetes manifests and sets active image tags for CD pipeline
+# ------------------------------------------------------------------------------
+deploy:prep-gke:
+  stage: deploy-prep
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache gettext sed
+  script:
+    - mkdir -p dist/k8s
+    - echo "Preparing GKE deployment manifests for SHA ${CI_COMMIT_SHORT_SHA}..."
+    - |
+      for service in booking payment; do
+        sed -e "s|IMAGE_TAG|${CI_COMMIT_SHORT_SHA}|g" \
+            -e "s|GCR_REGISTRY|${GCR_REGISTRY}|g" \
+            deployments/k8s/${service}.template.yaml > dist/k8s/${service}.yaml || true
+      done
+  artifacts:
+    name: "gke-manifests-${CI_COMMIT_SHORT_SHA}"
+    paths:
+      - dist/k8s/
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'

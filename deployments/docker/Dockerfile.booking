@@ -1,0 +1,38 @@
+# ==============================================================================
+# Multi-stage Dockerfile for Q-Sync Booking Service
+# Stage 1: Build binary with Go compiler
+# Stage 2: Minimal Distroless / Alpine runtime for security and tiny image size
+# ==============================================================================
+
+# ----------------- Build Stage -----------------
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /app
+
+RUN apk add --no-cache git ca-certificates tzdata
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Compile statically linked binary without CGO for scratch/distroless compatibility
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-s -w -extldflags '-static'" \
+    -o /bin/booking-service ./cmd/booking
+
+# ----------------- Runtime Stage -----------------
+FROM alpine:3.20
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S appgroup && adduser -S appuser -G appgroup
+
+COPY --from=builder /bin/booking-service /app/booking-service
+
+USER appuser
+
+EXPOSE 50051 8080
+
+ENTRYPOINT ["/app/booking-service"]

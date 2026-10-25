@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package booking.v1;
+
+option go_package = "github.com/qsync/platform/gen/go/booking/v1;bookingv1";
+
+import "google/protobuf/timestamp.proto";
+
+// BookingService provides distributed high-concurrency seat reservation and checkout workflows.
+service BookingService {
+  // ReserveSeat atomically locks a requested seat for a limited duration (e.g., 10 minutes)
+  // using Redis distributed locking while the user proceeds to checkout.
+  rpc ReserveSeat(ReserveSeatRequest) returns (ReserveSeatResponse);
+
+  // ConfirmBooking commits the reservation after payment verification (Saga pattern).
+  rpc ConfirmBooking(ConfirmBookingRequest) returns (ConfirmBookingResponse);
+
+  // CancelReservation releases the held seat lock and terminates an in-flight booking.
+  rpc CancelReservation(CancelReservationRequest) returns (CancelReservationResponse);
+
+  // GetBooking retrieves the state of an existing reservation or confirmed booking.
+  rpc GetBooking(GetBookingRequest) returns (GetBookingResponse);
+}
+
+enum ReservationStatus {
+  RESERVATION_STATUS_UNSPECIFIED = 0;
+  RESERVATION_STATUS_PENDING     = 1; // Locked in Redis & pending payment
+  RESERVATION_STATUS_CONFIRMED   = 2; // Payment captured, ACID committed in PostgreSQL
+  RESERVATION_STATUS_EXPIRED     = 3; // TTL lapsed without payment completion
+  RESERVATION_STATUS_CANCELLED   = 4; // User cancelled or payment failure compensation triggered
+}
+
+message ReserveSeatRequest {
+  string event_id         = 1;
+  string seat_id          = 2;
+  string user_id          = 3;
+  string idempotency_key  = 4; // Guarantees at-most-once execution on network retries
+  int32  hold_duration_sec = 5; // Default: 600 seconds (10 minutes)
+}
+
+message ReserveSeatResponse {
+  string reservation_id               = 1;
+  string event_id                     = 2;
+  string seat_id                      = 3;
+  string user_id                      = 4;
+  ReservationStatus status            = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  string message                      = 7;
+}
+
+message ConfirmBookingRequest {
+  string reservation_id  = 1;
+  string payment_id      = 2;
+  string idempotency_key = 3;
+}
+
+message ConfirmBookingResponse {
+  string booking_id                    = 1;
+  string reservation_id                = 2;
+  ReservationStatus status             = 3;
+  google.protobuf.Timestamp confirmed_at = 4;
+  string message                       = 5;
+}
+
+message CancelReservationRequest {
+  string reservation_id = 1;
+  string user_id        = 2;
+  string reason         = 3;
+}
+
+message CancelReservationResponse {
+  string reservation_id = 1;
+  bool   success        = 2;
+  string message        = 3;
+}
+
+message GetBookingRequest {
+  string booking_id     = 1;
+  string reservation_id = 2;
+}
+
+message GetBookingResponse {
+  string booking_id                    = 1;
+  string reservation_id                = 2;
+  string event_id                      = 3;
+  string seat_id                       = 4;
+  string user_id                       = 5;
+  ReservationStatus status             = 6;
+  google.protobuf.Timestamp created_at  = 7;
+  google.protobuf.Timestamp expires_at  = 8;
+  google.protobuf.Timestamp confirmed_at = 9;
+}
