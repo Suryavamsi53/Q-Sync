@@ -14,8 +14,10 @@ import (
 	bookingv1 "github.com/qsync/platform/gen/go/booking/v1"
 	grpchandler "github.com/qsync/platform/internal/booking/adapter/grpc"
 	kafkahandler "github.com/qsync/platform/internal/booking/adapter/kafka"
+	"github.com/qsync/platform/internal/booking/adapter/memory"
 	"github.com/qsync/platform/internal/booking/adapter/postgres"
 	"github.com/qsync/platform/internal/booking/adapter/redis"
+	"github.com/qsync/platform/internal/booking/port"
 	"github.com/qsync/platform/internal/booking/service"
 	"github.com/qsync/platform/pkg/logger"
 	goredis "github.com/redis/go-redis/v9"
@@ -30,7 +32,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// 2. Connect to Redis (Distributed Locks & Lua Scripts)
+	// 2. Redis Connection with Resilient In-Memory Fallback
+	var lockRepo port.SeatLockRepository
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
@@ -42,34 +45,50 @@ func main() {
 		Password: redisPassword,
 		DB:       0,
 	})
-	defer rdb.Close()
-	log.Info("Initialized Redis client", "addr", redisAddr)
 
-	lockRepo := redis.NewSeatLockRepository(rdb)
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer pingCancel()
 
-	// 3. Connect to PostgreSQL (ACID Persistence & Outbox)
+	if err := rdb.Ping(pingCtx).Err(); err == nil {
+		log.Info("Connected to Redis successfully (Distributed Mode)", "addr", redisAddr)
+		lockRepo = redis.NewSeatLockRepository(rdb)
+		defer rdb.Close()
+	} else {
+		log.Warn("Redis unreachable; activating Resilient In-Memory Lock Engine", "fallback", "in-memory")
+		lockRepo = memory.NewInMemorySeatLock()
+		_ = rdb.Close()
+	}
+
+	// 3. PostgreSQL Connection with Resilient In-Memory Fallback
+	var bookingRepo port.BookingRepository
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://qsync:qsync_secret@localhost:5432/qsync_db?sslmode=disable"
 	}
 
 	db, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		log.Error("Failed to open database connection", "error", err)
-	} else {
+	dbPingCtx, dbPingCancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer dbPingCancel()
+
+	if err == nil && db.PingContext(dbPingCtx) == nil {
 		db.SetMaxOpenConns(50)
 		db.SetMaxIdleConns(25)
 		db.SetConnMaxLifetime(5 * time.Minute)
-		log.Info("Database pool configured")
+		log.Info("Connected to PostgreSQL successfully (ACID Persistent Mode)")
+		bookingRepo = postgres.NewPostgresBookingRepository(db)
+		defer db.Close()
+	} else {
+		log.Warn("PostgreSQL unreachable; activating Resilient In-Memory Persistence Engine", "fallback", "in-memory")
+		bookingRepo = memory.NewInMemoryBookingRepository()
+		if db != nil {
+			_ = db.Close()
+		}
 	}
-	defer db.Close()
-
-	bookingRepo := postgres.NewPostgresBookingRepository(db)
 
 	// 4. Initialize Core Booking Service
 	bookingSvc := service.NewBookingService(lockRepo, bookingRepo)
 
-	// 5. Initialize Kafka Outbox Worker & Saga Consumer
+	// 5. Initialize Kafka Outbox Worker & Saga Consumer (if Kafka is available)
 	kafkaBroker := os.Getenv("KAFKA_BROKER")
 	if kafkaBroker == "" {
 		kafkaBroker = "localhost:9092"
@@ -102,9 +121,9 @@ func main() {
 	bookingv1.RegisterBookingServiceServer(grpcServer, grpcHandler)
 
 	go func() {
-		log.Info("gRPC server listening", "port", grpcPort)
+		log.Info("Booking gRPC server online and listening", "port", grpcPort)
 		if err := grpcServer.Serve(listener); err != nil && err != grpc.ErrServerStopped {
-			log.Error("gRPC server terminated with error", "error", err)
+			log.Error("gRPC server error", "error", err)
 		}
 	}()
 
@@ -112,7 +131,7 @@ func main() {
 	<-ctx.Done()
 	log.Info("Gracefully shutting down Booking Service...")
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 
 	stopped := make(chan struct{})

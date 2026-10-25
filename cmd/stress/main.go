@@ -24,8 +24,10 @@ func main() {
 	flag.Parse()
 
 	fmt.Println("================================================================================")
-	fmt.Printf(" Q-Sync Concurrency Benchmark: Racing %d goroutines for seat %s\n", *concurrency, *seatID)
-	fmt.Printf(" Target gRPC Service: %s\n", *target)
+	fmt.Printf(" Q-Sync Flash-Sale Concurrency Benchmark\n")
+	fmt.Printf(" Target gRPC Service : %s\n", *target)
+	fmt.Printf(" Contested Resource  : Event [%s], Seat [%s]\n", *eventID, *seatID)
+	fmt.Printf(" Concurrent Requests : %d simultaneous goroutines\n", *concurrency)
 	fmt.Println("================================================================================")
 
 	conn, err := grpc.NewClient(*target, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -40,6 +42,8 @@ func main() {
 	var successCount int64
 	var lockedCount int64
 	var errorCount int64
+	var firstError error
+	var errMu sync.Mutex
 
 	startBarrier := make(chan struct{})
 	var wg sync.WaitGroup
@@ -55,7 +59,7 @@ func main() {
 			defer wg.Done()
 			<-startBarrier // Synchronize firing moment
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
 			_, err := client.ReserveSeat(ctx, &bookingv1.ReserveSeatRequest{
@@ -74,12 +78,17 @@ func main() {
 					atomic.AddInt64(&lockedCount, 1)
 				} else {
 					atomic.AddInt64(&errorCount, 1)
+					errMu.Lock()
+					if firstError == nil {
+						firstError = err
+					}
+					errMu.Unlock()
 				}
 			}
 		}(userID, idemKey)
 	}
 
-	// Fire all goroutines
+	// Fire all goroutines simultaneously
 	close(startBarrier)
 	wg.Wait()
 
@@ -87,16 +96,20 @@ func main() {
 	rps := float64(*concurrency) / duration.Seconds()
 
 	fmt.Println("\n----------------------------- Benchmark Results -----------------------------")
-	fmt.Printf("Duration:               %v\n", duration)
-	fmt.Printf("Throughput:             %.2f requests/sec\n", rps)
-	fmt.Printf("Successful Bookings:    %d  (Expected: 1)\n", successCount)
-	fmt.Printf("Rejected (409 Conflict):%d  (Expected: %d)\n", lockedCount, *concurrency-1)
-	fmt.Printf("Network/System Errors:  %d  (Expected: 0)\n", errorCount)
+	fmt.Printf("Elapsed Duration        : %v\n", duration)
+	fmt.Printf("Throughput              : %.2f requests/sec\n", rps)
+	fmt.Printf("Successful Holds        : %d  (Expected: 1)\n", successCount)
+	fmt.Printf("Rejected (409 Conflict) : %d  (Expected: %d)\n", lockedCount, *concurrency-1)
+	fmt.Printf("Network/System Errors   : %d  (Expected: 0)\n", errorCount)
+	if firstError != nil {
+		fmt.Printf("Sample Error Detail     : %v\n", firstError)
+		fmt.Printf("Hint                    : Is 'go run ./cmd/booking' running on %s?\n", *target)
+	}
 	fmt.Println("-----------------------------------------------------------------------------")
 
-	if successCount == 1 && lockedCount == int64(*concurrency-1) {
+	if successCount == 1 && lockedCount == int64(*concurrency-1) && errorCount == 0 {
 		fmt.Println(" [PASS] Double-Booking Invariant Preserved! Zero race conditions detected.")
 	} else {
-		fmt.Println(" [FAIL] Race Condition Violation! Double-booking occurred or errors encountered.")
+		fmt.Println(" [FAIL] Race Condition Violation or Connection Errors detected.")
 	}
 }

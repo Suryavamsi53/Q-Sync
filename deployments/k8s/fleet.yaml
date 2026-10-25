@@ -1,0 +1,239 @@
+# ==============================================================================
+# Q-Sync Production Microservices Fleet - Kubernetes & GKE Manifests
+# ==============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: qsync
+  labels:
+    app.kubernetes.io/part-of: qsync-platform
+
+---
+# ------------------------------------------------------------------------------
+# Shared Cluster ConfigMap
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qsync-config
+  namespace: qsync
+data:
+  REDIS_ADDR: "qsync-redis.qsync.svc.cluster.local:6379"
+  DATABASE_URL: "postgres://qsync:qsync_secret@qsync-postgres.qsync.svc.cluster.local:5432/qsync_db?sslmode=disable"
+  KAFKA_BROKER: "qsync-kafka.qsync.svc.cluster.local:9092"
+  BOOKING_GRPC_ADDR: "booking-service.qsync.svc.cluster.local:50051"
+  CATALOG_URL: "http://catalog-service.qsync.svc.cluster.local:8082"
+
+---
+# ------------------------------------------------------------------------------
+# 1. API Gateway Deployment & Service
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: qsync
+  labels:
+    app: api-gateway
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: gateway
+          image: gcr.io/qsync-production/qsync-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: qsync-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: qsync
+spec:
+  type: LoadBalancer
+  selector:
+    app: api-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+
+---
+# ------------------------------------------------------------------------------
+# 2. Booking Engine (gRPC Core) Deployment & Service
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booking-service
+  namespace: qsync
+  labels:
+    app: booking-service
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: booking-service
+  template:
+    metadata:
+      labels:
+        app: booking-service
+    spec:
+      containers:
+        - name: booking
+          image: gcr.io/qsync-production/qsync-booking:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+          envFrom:
+            - configMapRef:
+                name: qsync-config
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: booking-service
+  namespace: qsync
+spec:
+  type: ClusterIP
+  selector:
+    app: booking-service
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+
+---
+# ------------------------------------------------------------------------------
+# 3. Catalog & Discovery Service
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-service
+  namespace: qsync
+  labels:
+    app: catalog-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: catalog-service
+  template:
+    metadata:
+      labels:
+        app: catalog-service
+    spec:
+      containers:
+        - name: catalog
+          image: gcr.io/qsync-production/qsync-catalog:latest
+          ports:
+            - containerPort: 8082
+          envFrom:
+            - configMapRef:
+                name: qsync-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-service
+  namespace: qsync
+spec:
+  type: ClusterIP
+  selector:
+    app: catalog-service
+  ports:
+    - name: http
+      port: 8082
+      targetPort: 8082
+
+---
+# ------------------------------------------------------------------------------
+# 4. Payment Saga Worker
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: qsync
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+        - name: payment
+          image: gcr.io/qsync-production/qsync-payment:latest
+          envFrom:
+            - configMapRef:
+                name: qsync-config
+
+---
+# ------------------------------------------------------------------------------
+# 5. Horizontal Pod Autoscaler (Flash-Sale Elastic Scaling)
+# ------------------------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: booking-hpa
+  namespace: qsync
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: booking-service
+  minReplicas: 5
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
