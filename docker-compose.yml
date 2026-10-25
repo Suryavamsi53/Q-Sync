@@ -61,6 +61,7 @@ services:
     image: apache/kafka:3.7.0
     container_name: qsync-kafka
     restart: unless-stopped
+    user: "0:0"
     ports:
       - "${KAFKA_PORT:-9092}:9092"
     environment:
