@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	bookingv1 "github.com/qsync/platform/gen/go/booking/v1"
+	"github.com/qsync/platform/internal/gateway/ui"
 	"github.com/qsync/platform/pkg/logger"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -135,6 +136,16 @@ func main() {
 		}
 
 		mux.ServeHTTP(w, r)
+	})
+
+	// Web Control Center UI
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(ui.DashboardHTML))
+	})
+	mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(ui.DashboardHTML))
 	})
 
 	// Health check
