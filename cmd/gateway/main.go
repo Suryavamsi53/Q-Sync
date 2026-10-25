@@ -164,6 +164,9 @@ func main() {
 	// Route Booking Confirmation
 	mux.HandleFunc("POST /api/v1/bookings/confirm", gw.handleConfirmBooking)
 
+	// Route Booking Cancellation
+	mux.HandleFunc("POST /api/v1/bookings/cancel", gw.handleCancelBooking)
+
 	port := os.Getenv("GATEWAY_PORT")
 	if port == "" {
 		port = "8000"
@@ -282,3 +285,39 @@ func (gw *APIGateway) handleConfirmBooking(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(grpcResp)
 }
+
+type CancelPayload struct {
+	ReservationID string `json:"reservation_id"`
+	UserID        string `json:"user_id"`
+	Reason        string `json:"reason"`
+}
+
+func (gw *APIGateway) handleCancelBooking(w http.ResponseWriter, r *http.Request) {
+	var payload CancelPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, `{"error":"invalid json payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	grpcResp, err := gw.bookingClient.CancelReservation(r.Context(), &bookingv1.CancelReservationRequest{
+		ReservationId: payload.ReservationID,
+		UserId:        payload.UserID,
+		Reason:        payload.Reason,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		st, ok := status.FromError(err)
+		if ok && st.Code() == codes.NotFound {
+			w.WriteHeader(http.StatusNotFound)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(grpcResp)
+}
+
